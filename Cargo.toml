@@ -1,0 +1,12 @@
+[package]
+name = "laundryserver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4.9.0"
+actix-cors = "0.7.0"
+serde = { version = "1.0.209", features = ["derive"] }
+serde_json = "1.0.127"
+chrono = "0.4.38"
+colored = "2.1.0"
