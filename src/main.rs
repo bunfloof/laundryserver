@@ -1,4 +1,5 @@
 use actix_cors::Cors;
+use actix_files as fs;
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use chrono::Local;
 use colored::*;
@@ -179,10 +180,7 @@ async fn main() -> std::io::Result<()> {
                     thread::spawn(move || handle_client(stream, clients_clone));
                 }
                 Err(e) => {
-                    log_with_timestamp(
-                        &format!("Connection failed: {}. Continuing to accept new clients...", e),
-                        "ERROR",
-                    );
+                    log_with_timestamp(&format!("Connection failed: {}. Continuing to accept new clients...", e), "ERROR");
                 }
             }
         }
@@ -207,6 +205,11 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Arc::clone(&clients)))
             .service(laundry_handler)
             .service(list_clients)
+            .service(
+                fs::Files::new("/", "./public_html")
+                    .show_files_listing()
+                    .index_file("index.html"),
+            )
     })
     .bind("0.0.0.0:25652")?
     .run()
