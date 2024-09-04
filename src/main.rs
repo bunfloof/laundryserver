@@ -1,6 +1,6 @@
 use actix_cors::Cors;
 use actix_files as fs;
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder, Result};
 use chrono::Local;
 use colored::*;
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,16 @@ fn log_with_timestamp(message: &str, log_type: &str) {
         _ => format!("[{}] {}", timestamp.blue(), message),
     };
     println!("{}", colored_message);
+}
+
+#[get("/about")]
+async fn about_page() -> impl Responder {
+    fs::NamedFile::open("./public_html/about.html").unwrap()
+}
+
+#[get("/api")]
+async fn api_page() -> impl Responder {
+    fs::NamedFile::open("./public_html/api.html").unwrap()
 }
 
 #[post("/")]
@@ -165,6 +175,12 @@ fn remove_inactive_clients(clients: &ClientList) {
     });
 }
 
+async fn not_found() -> Result<impl Responder> {
+    Ok(fs::NamedFile::open("./public_html/404.html")?
+        .customize()
+        .with_status(actix_web::http::StatusCode::NOT_FOUND))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let clients: ClientList = Arc::new(Mutex::new(HashMap::new()));
@@ -180,7 +196,10 @@ async fn main() -> std::io::Result<()> {
                     thread::spawn(move || handle_client(stream, clients_clone));
                 }
                 Err(e) => {
-                    log_with_timestamp(&format!("Connection failed: {}. Continuing to accept new clients...", e), "ERROR");
+                    log_with_timestamp(
+                        &format!("Connection failed: {}. Continuing to accept new clients...", e),
+                        "ERROR",
+                    );
                 }
             }
         }
@@ -205,11 +224,12 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Arc::clone(&clients)))
             .service(laundry_handler)
             .service(list_clients)
+            .service(about_page)
+            .service(api_page)
             .service(
-                fs::Files::new("/", "./public_html")
-                    .show_files_listing()
-                    .index_file("index.html"),
+                fs::Files::new("/", "./public_html").show_files_listing().index_file("index.html"),
             )
+            .default_service(web::route().to(not_found))
     })
     .bind("0.0.0.0:25652")?
     .run()
