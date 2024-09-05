@@ -16,7 +16,7 @@ struct Client {
     location: String,
     room: String,
     #[serde(skip_serializing)]
-    stream: Arc<Mutex<TcpStream>>,
+    stream: Arc<Mutex<Option<TcpStream>>>,
     #[serde(skip_serializing)]
     last_heartbeat: Instant,
 }
@@ -67,13 +67,19 @@ async fn laundry_handler(
 
     if let Some(client) = clients_guard.get_mut(&key) {
         let message = format!("Machine: {}", data.machine);
-        if let Err(e) = client.stream.lock().unwrap().write_all(message.as_bytes()) {
-            log_with_timestamp(&format!("Failed to send message: {}", e), "ERROR");
-            return HttpResponse::InternalServerError()
-                .body(format!("Failed to send message: {}", e));
+        let mut stream_guard = client.stream.lock().unwrap();
+        if let Some(stream) = stream_guard.as_mut() {
+            if let Err(e) = stream.write_all(message.as_bytes()) {
+                log_with_timestamp(&format!("Failed to send message: {}", e), "ERROR");
+                return HttpResponse::InternalServerError()
+                    .body(format!("Failed to send message: {}", e));
+            }
+            client.last_heartbeat = Instant::now();
+            HttpResponse::Ok().body("Message sent to the client")
+        } else {
+            log_with_timestamp("Client stream not available", "WARN");
+            HttpResponse::InternalServerError().body("Client stream not available")
         }
-        client.last_heartbeat = Instant::now();
-        HttpResponse::Ok().body("Message sent to the client")
     } else {
         log_with_timestamp("Client not found", "WARN");
         HttpResponse::NotFound().body("Client not found")
@@ -117,10 +123,19 @@ fn handle_client(mut stream: TcpStream, clients: ClientList) {
             let client = Client {
                 location: location.clone(),
                 room: room.clone(),
-                stream: Arc::new(Mutex::new(stream.try_clone().unwrap())),
+                stream: Arc::new(Mutex::new(Some(stream.try_clone().unwrap()))),
                 last_heartbeat: Instant::now(),
             };
-            clients.lock().unwrap().insert((location.clone(), room.clone()), client);
+
+            let mut clients_guard = clients.lock().unwrap();
+            if let Some(existing_client) = clients_guard.get_mut(&(location.clone(), room.clone()))
+            {
+                *existing_client.stream.lock().unwrap() = Some(stream.try_clone().unwrap());
+                existing_client.last_heartbeat = Instant::now();
+            } else {
+                clients_guard.insert((location.clone(), room.clone()), client);
+            }
+            drop(clients_guard);
 
             let clients_clone = Arc::clone(&clients);
             thread::spawn(move || {
@@ -146,15 +161,21 @@ fn handle_client_messages(mut stream: TcpStream, location: &str, room: &str, cli
                     }
                 }
             }
-            Ok(_) => break,  // connection closed
-            Err(_) => break, // error occurred
+            Ok(_) | Err(_) => {
+                log_with_timestamp(
+                    &format!("Client disconnected: Location: {}, Room: {}", location, room),
+                    "WARN",
+                );
+                let mut clients_guard = clients.lock().unwrap();
+                if let Some(client) =
+                    clients_guard.get_mut(&(location.to_string(), room.to_string()))
+                {
+                    *client.stream.lock().unwrap() = None;
+                }
+                break;
+            }
         }
     }
-    log_with_timestamp(
-        &format!("Client disconnected: Location: {}, Room: {}", location, room),
-        "WARN",
-    );
-    clients.lock().unwrap().remove(&(location.to_string(), room.to_string()));
 }
 
 fn remove_inactive_clients(clients: &ClientList) {
@@ -168,6 +189,9 @@ fn remove_inactive_clients(clients: &ClientList) {
                 ),
                 "WARN",
             );
+            if let Some(stream) = client.stream.lock().unwrap().take() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
             false
         } else {
             true
@@ -186,21 +210,34 @@ async fn main() -> std::io::Result<()> {
     let clients: ClientList = Arc::new(Mutex::new(HashMap::new()));
 
     let clients_clone = Arc::clone(&clients);
-    thread::spawn(move || {
-        let listener = TcpListener::bind("0.0.0.0:25651").expect("Failed to bind to port 25651");
-        log_with_timestamp("TCP server listening on port 25651", "INFO");
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let clients_clone = Arc::clone(&clients_clone);
-                    thread::spawn(move || handle_client(stream, clients_clone));
+    thread::spawn(move || loop {
+        match TcpListener::bind("0.0.0.0:25651") {
+            Ok(listener) => {
+                log_with_timestamp("TCP server listening on port 25651", "INFO");
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(stream) => {
+                            let clients_clone = Arc::clone(&clients_clone);
+                            thread::spawn(move || handle_client(stream, clients_clone));
+                        }
+                        Err(e) => {
+                            log_with_timestamp(
+                                &format!(
+                                    "Connection failed: {}. Continuing to accept new clients...",
+                                    e
+                                ),
+                                "ERROR",
+                            );
+                        }
+                    }
                 }
-                Err(e) => {
-                    log_with_timestamp(
-                        &format!("Connection failed: {}. Continuing to accept new clients...", e),
-                        "ERROR",
-                    );
-                }
+            }
+            Err(e) => {
+                log_with_timestamp(
+                    &format!("Failed to bind TCP listener: {}. Retrying in 5 seconds...", e),
+                    "ERROR",
+                );
+                thread::sleep(Duration::from_secs(5));
             }
         }
     });
