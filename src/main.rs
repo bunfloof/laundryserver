@@ -56,6 +56,12 @@ struct RoomQuery {
     room: String,
 }
 
+#[derive(Deserialize)]
+struct MachinesArchiveQuery {
+    location: String,
+    room: String,
+}
+
 struct AppState {
     db: Mutex<Connection>,
     db_update_in_progress: Arc<AtomicBool>,
@@ -508,6 +514,20 @@ async fn machine_health_handler(
     }
 }
 
+#[get("/machines_archive")]
+async fn get_machines_archive(query: web::Query<MachinesArchiveQuery>) -> Result<HttpResponse> {
+    let file_path = PathBuf::from("room")
+        .join(&query.location)
+        .join(format!("{}.json", query.room));
+    
+    match std_fs::read_to_string(file_path) {
+        Ok(contents) => Ok(HttpResponse::Ok()
+            .content_type("application/json")
+            .body(contents)),
+        Err(_) => Ok(HttpResponse::NotFound().body("Machines archive not found")),
+    }
+}
+
 #[get("/clients")]
 async fn list_clients(clients: web::Data<ClientList>) -> impl Responder {
     let clients_guard = clients.lock().unwrap();
@@ -595,7 +615,6 @@ async fn get_qr(data: web::Data<AppState>, query: web::Query<HashMap<String, Str
             params![qr_code],
             |row| row.get(0),
         );
-
         match result {
             Ok(json_str) => {
                 if let Ok(json) = serde_json::from_str::<Value>(&json_str) {
@@ -604,7 +623,14 @@ async fn get_qr(data: web::Data<AppState>, query: web::Query<HashMap<String, Str
                     HttpResponse::InternalServerError().body("Failed to parse JSON data")
                 }
             },
-            Err(_) => HttpResponse::NotFound().body("QR code not found"),
+            Err(_) => {
+                let error_response = json!({
+                    "statusCode": 404,
+                    "message": "Machine Detail by QR",
+                    "error": "Not Found"
+                });
+                HttpResponse::NotFound().json(error_response)
+            },
         }
     } else {
         HttpResponse::BadRequest().body("Missing 'code' query parameter")
@@ -965,10 +991,11 @@ async fn main() -> std::io::Result<()> {
             .service(about_page)
             .service(api_page)
             .service(get_machines)
+            .service(get_machines_archive)
             .service(machine_status_handler)
             .service(machine_health_handler)
             .service(get_qr)
-            .route("/iDQ0AdwiAq2Qh6BeiYJP", web::get().to(ws_handler))
+            .route("/iDQ0AdwiAq2Qh6BeiYJO", web::get().to(ws_handler))
             .route("/machinestatusws", web::get().to(ws_machine_status_handler))
             .service(
                 fs::Files::new("/", "./public_html").show_files_listing().index_file("index.html"),
