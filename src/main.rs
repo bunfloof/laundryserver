@@ -27,7 +27,7 @@ struct Client {
     #[serde(skip_serializing)]
     session: Session,
     #[serde(skip_serializing)]
-    response_sender: Arc<Mutex<Option<oneshot::Sender<String>>>>,
+    response_sender: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
 }
 
 type ClientList = Arc<Mutex<HashMap<(String, String), Client>>>;
@@ -216,7 +216,7 @@ async fn ws_handler(
                                         room: room.clone(),
                                         last_heartbeat: Instant::now(),
                                         session: session.clone(),
-                                        response_sender: Arc::new(Mutex::new(None)),
+                                        response_sender: Arc::new(Mutex::new(HashMap::new())),
                                     });
                                     
                                     client.last_heartbeat = Instant::now();
@@ -235,57 +235,97 @@ async fn ws_handler(
                                 }
                             }
                             "START_MACHINE_RESPONSE" => {
-                                if let Some(ref key) = client_info {
-                                    let mut clients_guard = clients_clone.lock().unwrap();
-                                    if let Some(client) = clients_guard.get_mut(key) {
-                                        let mut sender = client.response_sender.lock().unwrap();
-                                        if let Some(s) = sender.take() {
-                                            let _ = s.send(serde_json::to_string(&server_message.payload).unwrap());
-                                            log_with_timestamp(&format!("Sent START_MACHINE response to waiting request for client: {:?}", key), "INFO");
-                                        } else {
-                                            log_with_timestamp(&format!("Received START_MACHINE response but no waiting request for client: {:?}", key), "WARN");
+                                if let Some(request_id) = server_message.payload["request_id"].as_str() {
+                                    if let Some(ref key) = client_info {
+                                        let mut clients_guard = clients_clone.lock().unwrap();
+                                        if let Some(client) = clients_guard.get_mut(key) {
+                                            let mut sender = client.response_sender.lock().unwrap();
+                                            if let Some(tx) = sender.remove(request_id) {
+                                                let _ = tx.send(serde_json::to_string(&server_message.payload).unwrap());
+                                                log_with_timestamp(&format!("Sent START_MACHINE response for request ID: {}", request_id), "INFO");
+                                            } else {
+                                                log_with_timestamp(&format!("Received START_MACHINE response but no waiting request for ID: {}", request_id), "WARN");
+                                            }
                                         }
                                     }
                                 }
                             }
                             "MACHINE_STATUS_RESPONSE" => {
-                                if let Some(ref key) = client_info {
-                                    let mut clients_guard = clients_clone.lock().unwrap();
-                                    if let Some(client) = clients_guard.get_mut(key) {
-                                        let mut sender = client.response_sender.lock().unwrap();
-                                        if let Some(s) = sender.take() {
-                                            let _ = s.send(serde_json::to_string(&server_message.payload).unwrap());
-                                            log_with_timestamp(&format!("Sent MACHINE_STATUS response to waiting request for client: {:?}", key), "INFO");
-                                        } else {
-                                            log_with_timestamp(&format!("Received MACHINE_STATUS response but no waiting request for client: {:?}", key), "WARN");
+                                if let Some(request_id) = server_message.payload["request_id"].as_str() {
+                                    if let Some(ref key) = client_info {
+                                        let mut clients_guard = clients_clone.lock().unwrap();
+                                        if let Some(client) = clients_guard.get_mut(key) {
+                                            let mut sender = client.response_sender.lock().unwrap();
+                                            if let Some(tx) = sender.remove(request_id) {
+                                                let _ = tx.send(serde_json::to_string(&server_message.payload).unwrap());
+                                                //log_with_timestamp(&format!("Sent MACHINE_STATUS response for request ID: {}", request_id), "INFO");
+                                            } else {
+                                                log_with_timestamp(&format!("Received MACHINE_STATUS response but no waiting request for ID: {}", request_id), "WARN");
+                                            }
                                         }
                                     }
                                 }
                             }
                             "MACHINE_HEALTH_RESPONSE" => {
-                                if let Some(ref key) = client_info {
-                                    let mut clients_guard = clients_clone.lock().unwrap();
-                                    if let Some(client) = clients_guard.get_mut(key) {
-                                        let mut sender = client.response_sender.lock().unwrap();
-                                        if let Some(s) = sender.take() {
-                                            let _ = s.send(serde_json::to_string(&server_message.payload).unwrap());
-                                            log_with_timestamp(&format!("Sent MACHINE_HEALTH response to waiting request for client: {:?}", key), "INFO");
-                                        } else {
-                                            log_with_timestamp(&format!("Received MACHINE_HEALTH response but no waiting request for client: {:?}", key), "WARN");
+                                if let Some(request_id) = server_message.payload["request_id"].as_str() {
+                                    if let Some(ref key) = client_info {
+                                        let mut clients_guard = clients_clone.lock().unwrap();
+                                        if let Some(client) = clients_guard.get_mut(key) {
+                                            let mut sender = client.response_sender.lock().unwrap();
+                                            if let Some(tx) = sender.remove(request_id) {
+                                                let _ = tx.send(serde_json::to_string(&server_message.payload).unwrap());
+                                                log_with_timestamp(&format!("Sent MACHINE_HEALTH response for request ID: {}", request_id), "INFO");
+                                            } else {
+                                                log_with_timestamp(&format!("Received MACHINE_HEALTH response but no waiting request for ID: {}", request_id), "WARN");
+                                            }
                                         }
                                     }
                                 }
                             }
                             "MACHINES_RESPONSE" => {
-                                if let Some(ref key) = client_info {
-                                    let mut clients_guard = clients_clone.lock().unwrap();
-                                    if let Some(client) = clients_guard.get_mut(key) {
-                                        let mut sender = client.response_sender.lock().unwrap();
-                                        if let Some(s) = sender.take() {
-                                            let _ = s.send(serde_json::to_string(&server_message.payload).unwrap());
-                                            log_with_timestamp(&format!("Sent MACHINES_RESPONSE to waiting request for client: {:?}", key), "INFO");
-                                        } else {
-                                            log_with_timestamp(&format!("Received MACHINES_RESPONSE but no waiting request for client: {:?}", key), "WARN");
+                                if let Some(request_id) = server_message.payload["request_id"].as_str() {
+                                    if let Some(ref key) = client_info {
+                                        let mut clients_guard = clients_clone.lock().unwrap();
+                                        if let Some(client) = clients_guard.get_mut(key) {
+                                            let mut sender = client.response_sender.lock().unwrap();
+                                            if let Some(tx) = sender.remove(request_id) {
+                                                let _ = tx.send(serde_json::to_string(&server_message.payload).unwrap());
+                                                log_with_timestamp(&format!("Sent MACHINES_RESPONSE for request ID: {}", request_id), "INFO");
+                                            } else {
+                                                log_with_timestamp(&format!("Received MACHINES_RESPONSE but no waiting request for ID: {}", request_id), "WARN");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            "STATUS_RESPONSE" => {
+                                if let Some(request_id) = server_message.payload["request_id"].as_str() {
+                                    if let Some(ref key) = client_info {
+                                        let mut clients_guard = clients_clone.lock().unwrap();
+                                        if let Some(client) = clients_guard.get_mut(key) {
+                                            let mut sender = client.response_sender.lock().unwrap();
+                                            if let Some(tx) = sender.remove(request_id) {
+                                                let _ = tx.send(serde_json::to_string(&server_message.payload).unwrap());
+                                                log_with_timestamp(&format!("Sent STATUS_RESPONSE for request ID: {}", request_id), "INFO");
+                                            } else {
+                                                log_with_timestamp(&format!("Received STATUS_RESPONSE but no waiting request for ID: {}", request_id), "WARN");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            "CLIENT_INFO_RESPONSE" => {
+                                if let Some(request_id) = server_message.payload["request_id"].as_str() {
+                                    if let Some(ref key) = client_info {
+                                        let mut clients_guard = clients_clone.lock().unwrap();
+                                        if let Some(client) = clients_guard.get_mut(key) {
+                                            let mut sender = client.response_sender.lock().unwrap();
+                                            if let Some(tx) = sender.remove(request_id) {
+                                                let _ = tx.send(serde_json::to_string(&server_message.payload).unwrap());
+                                                log_with_timestamp(&format!("Sent CLIENT_INFO_RESPONSE for request ID: {}", request_id), "INFO");
+                                            } else {
+                                                log_with_timestamp(&format!("Received CLIENT_INFO_RESPONSE but no waiting request for ID: {}", request_id), "WARN");
+                                            }
                                         }
                                     }
                                 }
@@ -342,12 +382,13 @@ async fn laundry_handler(
     );
     let key = (data.location.clone(), data.room.clone());
     let (tx, rx) = oneshot::channel();
+    let request_id = uuid::Uuid::new_v4().to_string();
 
     {
         let mut clients_guard = clients.lock().unwrap();
         if let Some(client) = clients_guard.get_mut(&key) {
             let mut sender = client.response_sender.lock().unwrap();
-            *sender = Some(tx);
+            sender.insert(request_id.clone(), tx);
 
             let message = ServerMessage {
                 action: "START_MACHINE".to_string(),
@@ -355,6 +396,7 @@ async fn laundry_handler(
                     "machine": data.machine,
                     "location": data.location,
                     "room": data.room,
+                    "request_id": request_id,
                 }),
             };
             
@@ -370,7 +412,20 @@ async fn laundry_handler(
     }
 
     match tokio::time::timeout(Duration::from_secs(10), rx).await {
-        Ok(Ok(response)) => HttpResponse::Ok().body(response),
+        Ok(Ok(response)) => {
+            match serde_json::from_str::<serde_json::Value>(&response) {
+                Ok(json_response) => {
+                    if let Some(data) = json_response.get("data") {
+                        HttpResponse::Ok().json(data)
+                    } else {
+                        HttpResponse::Ok().body(response)
+                    }
+                },
+                Err(_) => {
+                    HttpResponse::Ok().body(response)
+                }
+            }
+        },
         Ok(Err(_)) => HttpResponse::InternalServerError().body("Failed to receive response from client"),
         Err(_) => HttpResponse::RequestTimeout().body("Request timed out"),
     }
@@ -387,16 +442,19 @@ async fn get_machines(
     if let (Some(location), Some(room)) = (location, room) {
         let key = (location.clone(), room.clone());
         let (tx, rx) = oneshot::channel();
+        let request_id = uuid::Uuid::new_v4().to_string();
 
         {
             let mut clients_guard = clients.lock().unwrap();
             if let Some(client) = clients_guard.get_mut(&key) {
                 let mut sender = client.response_sender.lock().unwrap();
-                *sender = Some(tx);
+                sender.insert(request_id.clone(), tx);
 
                 let message = ServerMessage {
                     action: "GET_MACHINES".to_string(),
-                    payload: serde_json::json!({}),
+                    payload: serde_json::json!({
+                        "request_id": request_id,
+                    }),
                 };
                 
                 if let Err(e) = client.session.text(serde_json::to_string(&message).unwrap()).await {
@@ -409,7 +467,20 @@ async fn get_machines(
         }
 
         match tokio::time::timeout(Duration::from_secs(10), rx).await {
-            Ok(Ok(response)) => HttpResponse::Ok().body(response),
+            Ok(Ok(response)) => {
+                match serde_json::from_str::<serde_json::Value>(&response) {
+                    Ok(json_response) => {
+                        if let Some(data) = json_response.get("data") {
+                            HttpResponse::Ok().json(data)
+                        } else {
+                            HttpResponse::Ok().body(response)
+                        }
+                    },
+                    Err(_) => {
+                        HttpResponse::Ok().body(response)
+                    }
+                }
+            },
             Ok(Err(_)) => HttpResponse::InternalServerError().body("Failed to receive response from client"),
             Err(_) => HttpResponse::RequestTimeout().body("Request timed out"),
         }
@@ -432,12 +503,13 @@ async fn machine_status_handler(
     );
     let key = (params.location.clone(), params.room.clone());
     let (tx, rx) = oneshot::channel();
+    let request_id = uuid::Uuid::new_v4().to_string();
 
     {
         let mut clients_guard = clients.lock().unwrap();
         if let Some(client) = clients_guard.get_mut(&key) {
             let mut sender = client.response_sender.lock().unwrap();
-            *sender = Some(tx);
+            sender.insert(request_id.clone(), tx);
 
             let message = ServerMessage {
                 action: "GET_MACHINE_STATUS".to_string(),
@@ -445,6 +517,7 @@ async fn machine_status_handler(
                     "machine": params.machine,
                     "location": params.location,
                     "room": params.room,
+                    "request_id": request_id,
                 }),
             };
             
@@ -460,7 +533,20 @@ async fn machine_status_handler(
     }
 
     match tokio::time::timeout(Duration::from_secs(10), rx).await {
-        Ok(Ok(response)) => HttpResponse::Ok().body(response),
+        Ok(Ok(response)) => {
+            match serde_json::from_str::<serde_json::Value>(&response) {
+                Ok(json_response) => {
+                    if let Some(data) = json_response.get("data") {
+                        HttpResponse::Ok().json(data)
+                    } else {
+                        HttpResponse::Ok().body(response)
+                    }
+                },
+                Err(_) => {
+                    HttpResponse::Ok().body(response)
+                }
+            }
+        },
         Ok(Err(_)) => HttpResponse::InternalServerError().body("Failed to receive response from client"),
         Err(_) => HttpResponse::RequestTimeout().body("Request timed out"),
     }
@@ -480,12 +566,13 @@ async fn machine_health_handler(
     );
     let key = (params.location.clone(), params.room.clone());
     let (tx, rx) = oneshot::channel();
+    let request_id = uuid::Uuid::new_v4().to_string();
 
     {
         let mut clients_guard = clients.lock().unwrap();
         if let Some(client) = clients_guard.get_mut(&key) {
             let mut sender = client.response_sender.lock().unwrap();
-            *sender = Some(tx);
+            sender.insert(request_id.clone(), tx);
 
             let message = ServerMessage {
                 action: "GET_MACHINE_HEALTH".to_string(),
@@ -493,6 +580,7 @@ async fn machine_health_handler(
                     "machine": params.machine,
                     "location": params.location,
                     "room": params.room,
+                    "request_id": request_id,
                 }),
             };
             
@@ -508,7 +596,20 @@ async fn machine_health_handler(
     }
 
     match tokio::time::timeout(Duration::from_secs(10), rx).await {
-        Ok(Ok(response)) => HttpResponse::Ok().body(response),
+        Ok(Ok(response)) => {
+            match serde_json::from_str::<serde_json::Value>(&response) {
+                Ok(json_response) => {
+                    if let Some(data) = json_response.get("data") {
+                        HttpResponse::Ok().json(data)
+                    } else {
+                        HttpResponse::Ok().body(response)
+                    }
+                },
+                Err(_) => {
+                    HttpResponse::Ok().body(response)
+                }
+            }
+        },
         Ok(Err(_)) => HttpResponse::InternalServerError().body("Failed to receive response from client"),
         Err(_) => HttpResponse::RequestTimeout().body("Request timed out"),
     }
@@ -533,6 +634,122 @@ async fn list_clients(clients: web::Data<ClientList>) -> impl Responder {
     let clients_guard = clients.lock().unwrap();
     let client_list: Vec<&Client> = clients_guard.values().collect();
     HttpResponse::Ok().json(client_list)
+}
+
+#[get("/status")]
+async fn get_status(
+    web::Query(params): web::Query<HashMap<String, String>>,
+    clients: web::Data<ClientList>,
+) -> impl Responder {
+    let location = params.get("location");
+    let room = params.get("room");
+
+    if let (Some(location), Some(room)) = (location, room) {
+        let key = (location.clone(), room.clone());
+        let (tx, rx) = oneshot::channel();
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        {
+            let mut clients_guard = clients.lock().unwrap();
+            if let Some(client) = clients_guard.get_mut(&key) {
+                let mut sender = client.response_sender.lock().unwrap();
+                sender.insert(request_id.clone(), tx);
+
+                let message = ServerMessage {
+                    action: "GET_STATUS".to_string(),
+                    payload: serde_json::json!({
+                        "request_id": request_id,
+                    }),
+                };
+                
+                if let Err(e) = client.session.text(serde_json::to_string(&message).unwrap()).await {
+                    log_with_timestamp(&format!("Failed to send GET_STATUS request to client: {:?}. Error: {}", key, e), "ERROR");
+                    return HttpResponse::InternalServerError().body("Failed to send request to the client");
+                }
+            } else {
+                return HttpResponse::NotFound().body("Client not found");
+            }
+        }
+
+        match tokio::time::timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(response)) => {
+                match serde_json::from_str::<serde_json::Value>(&response) {
+                    Ok(json_response) => {
+                        if let Some(data) = json_response.get("data") {
+                            HttpResponse::Ok().json(data)
+                        } else {
+                            HttpResponse::Ok().body(response)
+                        }
+                    },
+                    Err(_) => {
+                        HttpResponse::Ok().body(response)
+                    }
+                }
+            },
+            Ok(Err(_)) => HttpResponse::InternalServerError().body("Failed to receive response from client"),
+            Err(_) => HttpResponse::RequestTimeout().body("Request timed out"),
+        }
+    } else {
+        HttpResponse::BadRequest().body("Missing location or room parameters")
+    }
+}
+
+#[get("/client")]
+async fn get_client_info(
+    web::Query(params): web::Query<HashMap<String, String>>,
+    clients: web::Data<ClientList>,
+) -> impl Responder {
+    let location = params.get("location");
+    let room = params.get("room");
+
+    if let (Some(location), Some(room)) = (location, room) {
+        let key = (location.clone(), room.clone());
+        let (tx, rx) = oneshot::channel();
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        {
+            let mut clients_guard = clients.lock().unwrap();
+            if let Some(client) = clients_guard.get_mut(&key) {
+                let mut sender = client.response_sender.lock().unwrap();
+                sender.insert(request_id.clone(), tx);
+
+                let message = ServerMessage {
+                    action: "GET_CLIENT_INFO".to_string(),
+                    payload: serde_json::json!({
+                        "request_id": request_id,
+                    }),
+                };
+                
+                if let Err(e) = client.session.text(serde_json::to_string(&message).unwrap()).await {
+                    log_with_timestamp(&format!("Failed to send GET_CLIENT_INFO request to client: {:?}. Error: {}", key, e), "ERROR");
+                    return HttpResponse::InternalServerError().body("Failed to send request to the client");
+                }
+            } else {
+                return HttpResponse::NotFound().body("Client not found");
+            }
+        }
+
+        match tokio::time::timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(response)) => {
+                match serde_json::from_str::<serde_json::Value>(&response) {
+                    Ok(json_response) => {
+                        if let Some(data) = json_response.get("data") {
+                            HttpResponse::Ok().json(data)
+                        } else {
+                            HttpResponse::Ok().body(response)
+                        }
+                    },
+                    Err(_) => {
+                        HttpResponse::Ok().body(response)
+                    }
+                }
+            },
+            Ok(Err(_)) => HttpResponse::InternalServerError().body("Failed to receive response from client"),
+            Err(_) => HttpResponse::RequestTimeout().body("Request timed out"),
+        }
+    } else {
+        HttpResponse::BadRequest().body("Missing location or room parameters")
+    }
 }
 
 // async fn remove_inactive_clients(clients: web::Data<ClientList>) {
@@ -590,9 +807,9 @@ async fn remove_inactive_clients(clients: web::Data<ClientList>) {
     }
 }
 
-#[get("/about")]
-async fn about_page() -> impl Responder {
-    fs::NamedFile::open("./public_html/about.html").unwrap()
+#[get("/paper")]
+async fn paper_page() -> impl Responder {
+    fs::NamedFile::open("./public_html/paper.html").unwrap()
 }
 
 #[get("/api")]
@@ -840,21 +1057,22 @@ async fn ws_machine_status_logic(
     params: LaundryRequest,
     clients: web::Data<ClientList>,
 ) -> Result<String, actix_web::Error> {
-    log_with_timestamp(
-        &format!(
-            "WebSocket GET request - Location: {}, Room: {}, Machine: {}",
-            params.location, params.room, params.machine
-        ),
-        "INFO",
-    );
+    // log_with_timestamp(
+    //     &format!(
+    //         "WebSocket GET request - Location: {}, Room: {}, Machine: {}",
+    //         params.location, params.room, params.machine
+    //     ),
+    //     "INFO",
+    // );
     let key = (params.location.clone(), params.room.clone());
     let (tx, rx) = oneshot::channel();
+    let request_id = uuid::Uuid::new_v4().to_string();
 
     {
         let mut clients_guard = clients.lock().unwrap();
         if let Some(client) = clients_guard.get_mut(&key) {
             let mut sender = client.response_sender.lock().unwrap();
-            *sender = Some(tx);
+            sender.insert(request_id.clone(), tx);
 
             let message = ServerMessage {
                 action: "GET_MACHINE_STATUS".to_string(),
@@ -862,6 +1080,7 @@ async fn ws_machine_status_logic(
                     "machine": params.machine,
                     "location": params.location,
                     "room": params.room,
+                    "request_id": request_id,
                 }),
             };
             
@@ -869,7 +1088,7 @@ async fn ws_machine_status_logic(
                 log_with_timestamp(&format!("Failed to send GET_MACHINE_STATUS request to client: {:?}. Error: {}", key, e), "ERROR");
                 return Err(actix_web::error::ErrorInternalServerError("Failed to send request to the client"));
             }
-            log_with_timestamp(&format!("GET_MACHINE_STATUS request sent to client: {:?}", key), "INFO");
+            //log_with_timestamp(&format!("GET_MACHINE_STATUS request sent to client: {:?}", key), "INFO");
         } else {
             log_with_timestamp("Client not found", "WARN");
             return Err(actix_web::error::ErrorNotFound("Client not found"));
@@ -988,14 +1207,16 @@ async fn main() -> std::io::Result<()> {
             .service(get_room)
             .service(laundry_handler)
             .service(list_clients)
-            .service(about_page)
+            .service(paper_page)
             .service(api_page)
             .service(get_machines)
             .service(get_machines_archive)
+            .service(get_status)
+            .service(get_client_info)
             .service(machine_status_handler)
             .service(machine_health_handler)
             .service(get_qr)
-            .route("/iDQ0AdwiAq2Qh6BeiYJO", web::get().to(ws_handler))
+            .route("/ws", web::get().to(ws_handler))
             .route("/machinestatusws", web::get().to(ws_machine_status_handler))
             .service(
                 fs::Files::new("/", "./public_html").show_files_listing().index_file("index.html"),
