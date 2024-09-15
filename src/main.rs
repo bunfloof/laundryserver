@@ -1096,7 +1096,17 @@ async fn ws_machine_status_logic(
     }
 
     match tokio::time::timeout(Duration::from_secs(10), rx).await {
-        Ok(Ok(response)) => Ok(response),
+        Ok(Ok(response)) => {
+            let mut response_json: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| actix_web::error::ErrorInternalServerError(format!("Failed to parse response: {}", e)))?;
+            
+            response_json["requested_machine"] = serde_json::Value::String(params.machine);
+            response_json["requested_location"] = serde_json::Value::String(params.location);
+            response_json["requested_room"] = serde_json::Value::String(params.room);
+            
+            Ok(serde_json::to_string(&response_json)
+                .map_err(|e| actix_web::error::ErrorInternalServerError(format!("Failed to serialize response: {}", e)))?)
+        },
         Ok(Err(_)) => Err(actix_web::error::ErrorInternalServerError("Failed to receive response from client")),
         Err(_) => Err(actix_web::error::ErrorRequestTimeout("Request timed out")),
     }
