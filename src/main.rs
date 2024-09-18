@@ -1,9 +1,11 @@
 use actix_cors::Cors;
 use actix_files as fs;
-use actix_web::{get, post, web, App, HttpRequest, HttpResponse, HttpServer, Responder, Result};
+use actix_web::{get, post, web, App, HttpRequest, HttpResponse, HttpServer, Responder, Result, Error};
 use actix_ws::{Message as WsMessage, Session};
 use chrono::{Local, Utc};
 use colored::*;
+use dotenv::dotenv;
+use std::env;
 use futures_util::StreamExt;
 use reqwest::Client as HttpClient;
 use rusqlite::{params, Connection, Result as SqliteResult};
@@ -14,9 +16,62 @@ use std::fs as std_fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::oneshot;
 use tokio::time;
+use lettre::message::header::ContentType;
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{Message, SmtpTransport, Transport};
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref FRIENDLY_NAMES: HashMap<String, Location> = {
+        let mut m = HashMap::new();
+        m.insert(
+            "85859b65-2b10-4ed2-8785-8473ec121ff9".to_string(),
+            Location {
+                name: "University of California, Santa Cruz".to_string(),
+                rooms: vec![
+                    Room {
+                        id: "4403363-034".to_string(),
+                        name: "Merrill Dorms Bldg A Big Room 26".to_string(),
+                    },
+                    Room {
+                        id: "4403363-035".to_string(),
+                        name: "Merrill Dorms Bldg A Smol Room 24".to_string(),
+                    },
+                    Room {
+                        id: "4403363-026".to_string(),
+                        name: "Crown Apts in Front of Community Room".to_string(),
+                    },
+                ],
+            },
+        );
+        m.insert(
+            "0278f7f1-055d-4718-8efa-a33e89d92f81".to_string(),
+            Location {
+                name: "Furry Location".to_string(),
+                rooms: vec![
+                    Room {
+                        id: "4330413-003".to_string(),
+                        name: "Room 621".to_string(),
+                    },
+                ],
+            },
+        );
+        m
+    };
+}
+
+struct Location {
+    name: String,
+    rooms: Vec<Room>,
+}
+
+struct Room {
+    id: String,
+    name: String,
+}
 
 #[derive(Clone, Serialize)]
 struct Client {
@@ -62,12 +117,73 @@ struct MachinesArchiveQuery {
     room: String,
 }
 
+#[derive(Deserialize)]
+struct EmailRequest {
+    location: String,
+    room: String,
+    machine: String,
+    email: String,
+    offset_time: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct EmailEntry {
+    location: String,
+    room: String,
+    machine: String,
+    email: String,
+    offset_time: u32,
+    timestamp: SystemTime,
+    email_sent: bool,
+}
+
+struct EmailNotificationState {
+    email_entries: Vec<EmailEntry>,
+}
+
 struct AppState {
     db: Mutex<Connection>,
     db_update_in_progress: Arc<AtomicBool>,
     archiver_in_progress: Arc<AtomicBool>,
 }
 
+impl EmailNotificationState {
+    fn new() -> Self {
+        Self {
+            email_entries: Vec::new(),
+        }
+    }
+
+    fn add_or_update_entry(&mut self, mut entry: EmailEntry) -> Result<(), String> {
+        let existing_entries = self.email_entries.iter().filter(|e| 
+            e.location == entry.location && e.room == entry.room && e.machine == entry.machine
+        ).count();
+
+        if existing_entries >= 4 {
+            return Err("The limit of emails for this machine has been reached".to_string());
+        }
+
+        if let Some(existing_entry) = self.email_entries.iter_mut().find(|e| 
+            e.location == entry.location && e.room == entry.room && e.machine == entry.machine && e.email == entry.email
+        ) {
+            existing_entry.offset_time = entry.offset_time;
+            existing_entry.timestamp = SystemTime::now();
+            existing_entry.email_sent = false;
+        } else {
+            entry.email_sent = false;
+            self.email_entries.push(entry);
+        }
+
+        Ok(())
+    }
+
+    fn remove_old_entries(&mut self) {
+        let now = SystemTime::now();
+        self.email_entries.retain(|entry| {
+            now.duration_since(entry.timestamp).unwrap() <= Duration::from_secs(90 * 60)
+        });
+    }
+}
 
 fn init_db(conn: &Connection) -> SqliteResult<()> {
     conn.execute(
@@ -817,6 +933,16 @@ async fn api_page() -> impl Responder {
     fs::NamedFile::open("./public_html/api.html").unwrap()
 }
 
+#[get("/more")]
+async fn more_page() -> impl Responder {
+    fs::NamedFile::open("./public_html/more.html").unwrap()
+}
+
+#[get("/privacy")]
+async fn privacy_page() -> impl Responder {
+    fs::NamedFile::open("./public_html/privacy.html").unwrap()
+}
+
 async fn not_found() -> Result<impl Responder> {
     Ok(fs::NamedFile::open("./public_html/404.html")?
         .customize()
@@ -1088,7 +1214,6 @@ async fn ws_machine_status_logic(
                 log_with_timestamp(&format!("Failed to send GET_MACHINE_STATUS request to client: {:?}. Error: {}", key, e), "ERROR");
                 return Err(actix_web::error::ErrorInternalServerError("Failed to send request to the client"));
             }
-            //log_with_timestamp(&format!("GET_MACHINE_STATUS request sent to client: {:?}", key), "INFO");
         } else {
             log_with_timestamp("Client not found", "WARN");
             return Err(actix_web::error::ErrorNotFound("Client not found"));
@@ -1171,8 +1296,272 @@ async fn ws_machine_status_handler(
     Ok(response)
 }
 
+#[post("/email")]
+async fn email_notification(
+    req: web::Json<EmailRequest>,
+    email_state: web::Data<Mutex<EmailNotificationState>>,
+    clients: web::Data<ClientList>,
+) -> Result<HttpResponse, Error> {
+    log_with_timestamp(&format!("Received email notification request for machine {} in room {}", req.machine, req.room), "INFO");
+
+    if req.offset_time == 0 || req.offset_time > 20 {
+        log_with_timestamp(&format!("Invalid offset time: {}", req.offset_time), "WARN");
+        return Ok(HttpResponse::BadRequest().json(json!({
+            "error": "Offset time should be greater than 0 and less than or equal to 20 minutes"
+        })));
+    }
+
+    let laundry_req = LaundryRequest {
+        location: req.location.clone(),
+        room: req.room.clone(),
+        machine: req.machine.clone(),
+    };
+
+    match ws_machine_status_logic(laundry_req, clients).await {
+        Ok(machine_status) => {
+            //log_with_timestamp(&format!("Received machine status for {}: {}", req.machine, machine_status), "INFO");
+            let status_json: Value = serde_json::from_str(&machine_status)
+                .map_err(|e| {
+                    log_with_timestamp(&format!("Failed to parse machine status: {}", e), "ERROR");
+                    actix_web::error::ErrorInternalServerError(format!("Failed to parse machine status: {}", e))
+                })?;
+
+            if status_json["error"].is_string() {
+                log_with_timestamp(&format!("Invalid machine: {}", req.machine), "WARN");
+                return Ok(HttpResponse::BadRequest().json(json!({"error": "Invalid machine"})));
+            }
+
+            let new_entry = EmailEntry {
+                location: req.location.clone(),
+                room: req.room.clone(),
+                machine: req.machine.clone(),
+                email: req.email.clone(),
+                offset_time: req.offset_time,
+                timestamp: SystemTime::now(),
+                email_sent: false,
+            };
+
+            let mut email_state = email_state.lock().map_err(|e| {
+                log_with_timestamp(&format!("Failed to lock email state: {}", e), "ERROR");
+                actix_web::error::ErrorInternalServerError(format!("Failed to lock email state: {}", e))
+            })?;
+
+            match email_state.add_or_update_entry(new_entry) {
+                Ok(_) => {
+                    log_with_timestamp(&format!("Email notification registered successfully for {}", req.machine), "INFO");
+                    Ok(HttpResponse::Ok().json(json!({"message": "Email notification registered successfully"})))
+                },
+                Err(e) => {
+                    log_with_timestamp(&format!("Failed to register email notification: {}", e), "ERROR");
+                    Ok(HttpResponse::BadRequest().json(json!({"error": e})))
+                },
+            }
+        },
+        Err(e) => {
+            log_with_timestamp(&format!("Failed to get machine status: {}", e), "ERROR");
+            Ok(HttpResponse::InternalServerError().json(json!({"error": format!("Failed to get machine status: {}", e)})))
+        }
+    }
+}
+
+async fn check_and_send_emails(email_state: web::Data<Mutex<EmailNotificationState>>, clients: web::Data<ClientList>) {
+    log_with_timestamp("Starting email notification check loop", "INFO");
+    loop {
+        time::sleep(Duration::from_secs(1)).await;
+
+        let mut email_state = email_state.lock().unwrap();
+        email_state.remove_old_entries();
+
+        for entry in &mut email_state.email_entries {
+            if entry.email_sent {
+                continue;
+            }
+
+            let laundry_req = LaundryRequest {
+                location: entry.location.clone(),
+                room: entry.room.clone(),
+                machine: entry.machine.clone(),
+            };
+
+            match ws_machine_status_logic(laundry_req, clients.clone()).await {
+                Ok(machine_status) => {
+                    if let Ok(status_json) = serde_json::from_str::<Value>(&machine_status) {
+                        if let Some(data) = status_json["data"].as_object() {
+                            if let (Some(status), Some(remaining_mins), Some(remaining_secs)) = (
+                                data["machineStatus"].as_str(),
+                                data["remainingCycleMins"].as_u64(),
+                                data["remainingCycleSecs"].as_u64()
+                            ) {
+                                let total_remaining_time = remaining_mins * 60 + remaining_secs;
+                                let offset_time_secs = entry.offset_time as u64 * 60;
+
+                                if status.ends_with('8') && total_remaining_time <= offset_time_secs && total_remaining_time > offset_time_secs.saturating_sub(60) {
+                                    log_with_timestamp(&format!("Sending email notification for machine {}. Remaining time: {} mins {} secs", entry.machine, remaining_mins, remaining_secs), "INFO");
+                                    send_email(&entry, remaining_mins as u32, remaining_secs as u32).await;
+                                    entry.email_sent = true;
+                                }
+                            }
+                        } else {
+                            log_with_timestamp(&format!("Unexpected JSON structure for machine {}: {:?}", entry.machine, status_json), "WARN");
+                        }
+                    } else {
+                        log_with_timestamp(&format!("Failed to parse JSON for machine {}: {}", entry.machine, machine_status), "ERROR");
+                    }
+                },
+                Err(e) => log_with_timestamp(&format!("Failed to get machine status for {}: {}", entry.machine, e), "ERROR"),
+            }
+        }
+    }
+}
+
+async fn send_email(entry: &EmailEntry, remaining_mins: u32, remaining_secs: u32) {
+    let time_message = if remaining_mins > 0 {
+        if remaining_mins == 1 {
+            format!("1 minute")
+        } else {
+            format!("{} minutes", remaining_mins)
+        }
+    } else if remaining_secs == 1 {
+        format!("1 second")
+    } else {
+        format!("{} seconds", remaining_secs)
+    };
+
+    let (location_name, room_name) = get_friendly_name(&entry.location, &entry.room);
+
+    let html_template = r#"<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <style type="text/css" rel="stylesheet" media="all">
+      /* Media Queries */
+      @media only screen and (max-width: 500px) {
+        .button {
+          width: 100% !important;
+        }
+      }
+    </style>
+  </head>
+  <body style="margin: 0; padding: 0; width: 100%; background-color: #F2F4F6;">
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        <td style="width: 100%; margin: 0; padding: 0; background-color: #F2F4F6;" align="center">
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <!-- Logo -->
+            <tr>
+              <td style="padding: 25px 0; text-align: center;">
+                <a style="font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size: 16px; font-weight: bold; color: #2F3133; text-decoration: none; text-shadow: 0 1px 0 white;" href="https://laundry.ucsc.gay" target="_blank"> LaundryFurry </a>
+              </td>
+            </tr>
+            <!-- Email Body -->
+            <tr>
+              <td style="width: 100%; margin: 0; padding: 0; border-top: 1px solid #EDEFF2; border-bottom: 1px solid #EDEFF2; background-color: #FFF;" width="100%">
+                <table style="width: auto; max-width: 570px; margin: 0 auto; padding: 0;" align="center" width="570" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; padding: 35px;">
+                      <!-- Greeting -->
+                      <h1 style="margin-top: 0; color: #2F3133; font-size: 19px; font-weight: bold; text-align: left;"> Hello comrade! </h1>
+                      <!-- Intro -->
+                      <p style="margin-top: 0; color: #74787E; font-size: 16px; line-height: 1.5em;"> Your laundry in machine {machine} at {room_name} ({location_name}) will be done in {time_message}.</p>
+                      <!-- Action Button -->
+                      <!-- Outro -->
+                      <!-- Salutation -->
+                      <p style="margin-top: 0; color: #74787E; font-size: 16px; line-height: 1.5em;"> Regards, <br>Bun </p>
+                      <!-- Sub Copy -->
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <!-- Footer -->
+            <tr>
+              <td>
+                <table style="width: auto; max-width: 570px; margin: 0 auto; padding: 0; text-align: center;" align="center" width="570" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; color: #AEAEAE; padding: 35px; text-align: center;">
+                      <p style="margin-top: 0; color: #74787E; font-size: 12px; line-height: 1.5em;"> © 2024 <a style="color: #3869D4;" href="https://laundry.ucsc.gay" target="_blank">LaundryFurry</a>. All rights reserved. </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"#;
+
+    let email_body = html_template
+        .replace("{machine}", &entry.machine)
+        .replace("{room_name}", &room_name)
+        .replace("{location_name}", &location_name)
+        .replace("{time_message}", &time_message);
+
+    let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD must be set in the .env file");
+
+    let email = Message::builder()
+        .from("LaundryFurry <laundry@ucsc.gay>".parse().unwrap())
+        .to(entry.email.parse().unwrap())
+        .subject(format!("{} finishing soon", entry.machine))
+        .header(ContentType::TEXT_HTML)
+        .body(email_body)
+        .unwrap();
+
+    let creds = Credentials::new("laundry@ucsc.gay".to_string(), smtp_password);
+
+    let mailer = SmtpTransport::relay("smtpdm.aliyun.com")
+        .unwrap()
+        .credentials(creds)
+        .build();
+
+    match mailer.send(&email) {
+        Ok(_) => log_with_timestamp(&format!("Email sent successfully for machine {}. Remaining time: {}", entry.machine, time_message), "INFO"),
+        Err(e) => log_with_timestamp(&format!("Could not send email for machine {}: {:?}", entry.machine, e), "ERROR"),
+    }
+}
+
+
+// #[get("/e")]
+// async fn debug_email_entries(email_state: web::Data<Mutex<EmailNotificationState>>) -> Result<HttpResponse> {
+//     let email_state = email_state.lock().unwrap();
+
+//     let entries_json: Vec<serde_json::Value> = email_state.email_entries.iter().map(|entry| {
+//         json!({
+//             "location": entry.location,
+//             "room": entry.room,
+//             "machine": entry.machine,
+//             "email": entry.email,
+//             "offset_time": entry.offset_time,
+//             "timestamp": entry.timestamp.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+//             "email_sent": entry.email_sent
+//         })
+//     }).collect();
+
+//     log_with_timestamp("Secret debug endpoint accessed for email entries", "WARN");
+
+//     Ok(HttpResponse::Ok().json(entries_json))
+// }
+
+fn get_friendly_name(location_id: &str, room_id: &str) -> (String, String) {
+    let location_name = FRIENDLY_NAMES
+        .get(location_id)
+        .map(|loc| loc.name.clone())
+        .unwrap_or_else(|| location_id.to_string());
+
+    let room_name = FRIENDLY_NAMES
+        .get(location_id)
+        .and_then(|loc| loc.rooms.iter().find(|room| room.id == room_id))
+        .map(|room| room.name.clone())
+        .unwrap_or_else(|| room_id.to_string());
+
+    (location_name, room_name)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    dotenv().ok();
     let clients: ClientList = Arc::new(Mutex::new(HashMap::new()));
     let clients_data = web::Data::new(clients.clone());
 
@@ -1199,6 +1588,14 @@ async fn main() -> std::io::Result<()> {
     //     }
     // });
 
+    let email_state = web::Data::new(Mutex::new(EmailNotificationState::new()));
+
+    let email_state_clone = email_state.clone();
+    let clients_data_clone = clients_data.clone();
+    actix_web::rt::spawn(async move {
+        check_and_send_emails(email_state_clone, clients_data_clone).await;
+    });
+
     log_with_timestamp("HTTP server starting on port 25652", "INFO");
     HttpServer::new(move || {
         App::new()
@@ -1211,6 +1608,7 @@ async fn main() -> std::io::Result<()> {
             )
             .app_data(clients_data.clone())
             .app_data(app_state.clone())
+            .app_data(email_state.clone())
             .service(manual_update_db)
             .service(manual_run_archiver)
             .service(get_location)
@@ -1225,6 +1623,7 @@ async fn main() -> std::io::Result<()> {
             .service(get_client_info)
             .service(machine_status_handler)
             .service(machine_health_handler)
+            .service(email_notification)
             .service(get_qr)
             .route("/ws", web::get().to(ws_handler))
             .route("/machinestatusws", web::get().to(ws_machine_status_handler))
